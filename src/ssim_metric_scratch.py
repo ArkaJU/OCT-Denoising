@@ -1,13 +1,13 @@
-import torch
+import numpy as np
 
 def ssim_scratch(y_true, y_pred):
     x = y_true
     y = y_pred
-    ave_x = torch.mean(x)
-    ave_y = torch.mean(y)
-    var_x = torch.var(x)
-    var_y = torch.var(y)
-    covariance = torch.mean(x*y) - ave_x*ave_y
+    ave_x = np.mean(x)
+    ave_y = np.mean(y)
+    var_x = np.var(x)
+    var_y = np.var(y)
+    covariance = np.mean(x*y) - ave_x*ave_y
     c1 = 0.01**4
     c2 = 0.03**4
     ssim = (2*ave_y*ave_x+c1)*(2*covariance+c2)

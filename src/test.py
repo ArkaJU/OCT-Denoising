@@ -9,7 +9,6 @@ from noise2noise import Noise2Noise
 
 from argparse import ArgumentParser
 
-
 def parse_args():
     """Command-line argument parser for testing."""
 
@@ -18,7 +17,7 @@ def parse_args():
 
     # Data parameters
     parser.add_argument('-d', '--data', help='dataset root path', default='../data')
-    parser.add_argument('-i', '--indices', nargs="+", help='indices of the validation set')
+    #parser.add_argument('-i', '--indices', nargs="+", help='indices of the validation set')
     parser.add_argument('--load-ckpt', help='load model checkpoint')
     parser.add_argument('--show-output', help='pop up window to display outputs', default=0, type=int)
     parser.add_argument('--cuda', help='use cuda', action='store_true')

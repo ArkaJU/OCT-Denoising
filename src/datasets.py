@@ -9,6 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 from utils import load_hdr_as_tensor
 
 import os
+import cv2
 from sys import platform
 import numpy as np
 import random
@@ -27,13 +28,13 @@ def load_testset(root_dir, params, shuffled=False, single=False):
     noise = ('gaussian', 50)
 
     dataset = NoisyDataset(root_dir, params.redux, params.crop_size, rgb=params.rgb, transform=params.transform,
-        clean_targets=params.clean_targets, noise_dist=noise, seed=params.seed, test=True, indices=params.indices)
+        clean_targets=params.clean_targets, noise_dist=noise, seed=params.seed, test=True)
 
     # Use batch size of 1, if requested (e.g. test set)
-    if len(params.indices)==1:
-        return DataLoader(dataset, batch_size=1, shuffle=shuffled)
-    else:
-        return DataLoader(dataset, batch_size=8, shuffle=shuffled)
+    # if len(params.indices)==1:
+    return DataLoader(dataset, batch_size=1, shuffle=shuffled)
+    # else:
+    #     return DataLoader(dataset, batch_size=8, shuffle=shuffled)
 
 
 def load_dataset(root_dir, redux, params, shuffled=False, single=False):
@@ -110,7 +111,7 @@ class NoisyDataset(AbstractDataset):
     """Class for injecting random noise into dataset."""
 
     def __init__(self, root_dir, redux, crop_size, rgb, transform, clean_targets=False,
-        noise_dist=('gaussian', 50.), seed=None, test=False, indices=[]):
+        noise_dist=('gaussian', 50.), seed=None, test=False):
         """Initializes noisy image dataset."""
 
         super(NoisyDataset, self).__init__(root_dir, redux, crop_size, clean_targets)
@@ -123,9 +124,9 @@ class NoisyDataset(AbstractDataset):
 
         if redux:
             self.imgs = self.imgs[:redux]
-        elif test:
-            indices = [int(i) for i in indices]
-            self.imgs = list(np.array(self.imgs)[indices])
+        # elif test:
+        #     indices = [int(i) for i in indices]
+        #     self.imgs = list(np.array(self.imgs)[indices])
 
 
         #self.noise_for_source = [None]*len(self.imgs) #list of constant noise for source across all epochs specific to each image
@@ -142,9 +143,13 @@ class NoisyDataset(AbstractDataset):
 
     def _add_noise(self, img, sigma=None):
         """Adds Gaussian or Poisson noise to image."""
-
-        w, h = img.size
-        c = len(img.getbands())
+        if len(img.shape)==3:
+            w, h, c = img.shape
+        else:
+          w, h = img.shape
+          c = 1
+        # w, h = img.size
+        # c = len(img.getbands())
         #print(c, w, h)
         # Poisson distribution
         # It is unclear how the paper handles this. Poisson noise is not additive,
@@ -174,7 +179,8 @@ class NoisyDataset(AbstractDataset):
         #noise_img = np.clip(noise_img, 0, 1).astype(np.float32)
         noise_img = np.clip(noise_img, 0, 255).astype(np.uint8)
 
-        return Image.fromarray(noise_img)
+        #return Image.fromarray(noise_img)
+        return noise_img
 
 
     def _corrupt(self, img, sigma=None):
@@ -217,7 +223,8 @@ class NoisyDataset(AbstractDataset):
     
     def rescale(self, image):
         image = (image-np.min(image))/(np.max(image)-np.min(image))
-        image = Image.fromarray(image*255)
+        #image = Image.fromarray(image*255)
+        image = image*255
         return image
 
 
@@ -228,53 +235,44 @@ class NoisyDataset(AbstractDataset):
     def __getitem__(self, index):
         """Retrieves image from folder and corrupts it."""
 
-        # Load PIL image
-        # img_path = os.path.join(self.root_dir, self.imgs[index])
-        # base = Image.open(img_path).convert('L')
-
         clean_path = os.path.join(self.clean_img_dir, self.imgs[index])
         noisy_path = os.path.join(self.noisy_img_dir, self.imgs[index])
         if self.rgb:
           clean = Image.open(clean_path).convert('RGB')
           noisy = Image.open(noisy_path).convert('RGB')
         else:
-          clean = Image.open(clean_path).convert('L')
-          noisy = Image.open(noisy_path).convert('L')
+          # clean = Image.open(clean_path).convert('L')
+          # noisy = Image.open(noisy_path).convert('L')
+          clean = cv2.imread(clean_path, cv2.IMREAD_GRAYSCALE)
+          noisy = cv2.imread(noisy_path, cv2.IMREAD_GRAYSCALE)
 
-        #base = self._corrupt(clean, sigma=15)
-        # Random square crop
-        if self.crop_size != 0:
-            noisy, clean = self._random_crop([noisy, clean])
-
-        
         # Clean image
-        clean = self.to_tensor(clean)
-        noisy_original = noisy
-        noisy_original = self.to_tensor(noisy_original)
+        clean          = self.to_tensor(clean)
+        noisy_original = self.to_tensor(noisy)
 
         # Transforming noisy image
         if self.transform=="anscombe":
-            noisy_transformed = Image.fromarray(self.anscombe(np.array(noisy)).astype('float32')) 
-        
-        elif self.transform=="log":
-            c, noisy_transformed = self.log(np.array(noisy))
-            c = c.astype('float32')
-            noisy_transformed = Image.fromarray(noisy_transformed.astype('float32')) 
-        
+            #noisy_transformed = Image.fromarray(self.anscombe(np.array(noisy)).astype('float32')) 
+            noisy_transformed = self.anscombe(np.array(noisy).astype('float32')) 
         else:   #for none
             noisy_transformed = noisy
+          
+        
 
         #Rescale from 0-255
+
         noisy_transformed = self.rescale(noisy_transformed)
 
-        # Double Corrupt source image
         source = self.to_tensor(self._corrupt(self._corrupt(noisy_transformed)))
+        target = self.to_tensor(self._corrupt(noisy_transformed))  
+        noisy_transformed = self.to_tensor(noisy_transformed)     
         
-        # Corrupt target image
-        target = self.to_tensor(self._corrupt(noisy_transformed))       
-        
-        # Transformed image
-        noisy_transformed = self.to_tensor(noisy_transformed)
+        # print("source", source.max(), source.min())
+        # print("target", target.max(), target.min())
+        # print("clean", clean.max(), clean.min())
+        # print("noisy_transformed", noisy_transformed.max(), noisy_transformed.min())
+        # print("noisy_original", noisy_original.max(), noisy_original.min())
+        # print()
 
         clean = self.normalize(clean)
         source = self.normalize(source)

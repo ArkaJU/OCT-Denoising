@@ -8,11 +8,22 @@ from torchvision.utils import save_image
 
 from unet import UNet
 from utils import *
+
+from tqdm import tqdm
+
+import pytorch_ssim
+from torchgeometry import losses
 from ssim_metric2 import ssim
+from ssim_metric import ssim as ssim1
 from ssim_metric_scratch import ssim_scratch
+from skimage.metrics import peak_signal_noise_ratio
+from metrics import ENL, EPI
+
 
 import os
 import json
+
+ssim_loss = pytorch_ssim.SSIM()
 
 
 class Noise2Noise(object):
@@ -22,10 +33,12 @@ class Noise2Noise(object):
         """Initializes model."""
 
         self.p = params
+        # self.w1 = torch.Tensor([0.3]).cuda()
         self.trainable = trainable
         self.best_valid_loss = float('inf')
-        self.early_stopping = EarlyStopping(patience=10)
+        self.early_stopping = EarlyStopping(patience=50)
         self._compile()
+        
 
 
     def _compile(self):
@@ -57,6 +70,8 @@ class Noise2Noise(object):
                 assert self.is_mc, 'Using HDR loss on non Monte Carlo images'
                 self.loss = HDRLoss()
             elif self.p.loss == 'l2':
+                self.loss = nn.MSELoss()
+            elif self.p.loss == 'l2_ssim':
                 self.loss = nn.MSELoss()
             else:
                 self.loss = nn.L1Loss()
@@ -162,6 +177,7 @@ class Noise2Noise(object):
             plot_per_epoch(self.ckpt_dir, 'Valid loss', stats['valid_loss'], loss_str)
             plot_per_epoch(self.ckpt_dir, 'Valid PSNR', stats['valid_psnr'], 'PSNR (dB)')
             plot_per_epoch(self.ckpt_dir, 'Valid SSIM', stats['valid_ssim'], 'SSIM')
+            plot_per_epoch(self.ckpt_dir, 'Valid SSIM2', stats['valid_ssim2'], 'SSIM2')
         
         if self.early_stopping(valid_loss):
             return {"stop": True}
@@ -172,18 +188,17 @@ class Noise2Noise(object):
         """Evaluates denoiser on test set."""
 
         self.model.train(False)
-
-        source_imgs = []
-        denoised_imgs = []
-        clean_imgs = []
+        psnr_, ssim, enl, epi = [], [], [], []
 
         # Create directory for denoised images
         save_path = os.path.join('/content', 'test_results')
         if not os.path.isdir(save_path):
             os.mkdir(save_path)
 
-        for batch_idx, (_, _, clean, noisy_transformed, noisy_original) in enumerate(test_loader):
-            # Only do first <show> images
+        n = len(test_loader)
+        print(f"len(test_loader): {n}")
+
+        for batch_idx, (_, _, clean, noisy_transformed, noisy_original) in enumerate(tqdm(test_loader)):
 
             if self.p.transform=="log":
                 c, noisy_transformed = noisy_transformed
@@ -196,46 +211,48 @@ class Noise2Noise(object):
                 noisy_original = noisy_original.cuda()
 
             # Denoise
-            noisy_denoised = self.model(noisy_transformed)
+            noisy_transformed_denoised = self.model(noisy_transformed)
+            noisy_transformed_denoised = self.model(noisy_transformed_denoised)
 
             # Inverse transformation
             if self.p.transform=="anscombe":
-                noisy_denoised = self.normalize(self.inverse_anscombe(noisy_denoised*255))
+                noisy_denoised = self.normalize(self.inverse_anscombe(noisy_transformed_denoised*255))
             elif self.p.transform=="log":
-                noisy_denoised = self.normalize(self.inverse_log(c, noisy_denoised*255))
-              
+                noisy_denoised = self.normalize(self.inverse_log(c, noisy_transformed_denoised*255))
 
-        clean = clean.cpu()
-        noisy_original = noisy_original.cpu()
-        noisy_denoised = noisy_denoised.cpu()
+            psnr_ += [peak_signal_noise_ratio(clean.cpu().detach().numpy(), noisy_denoised.cpu().detach().numpy())]
+            #psnr_ += [psnr(clean, noisy_denoised).item()]
+            ssim += [ssim_scratch(clean.cpu().detach().numpy(), noisy_denoised.cpu().detach().numpy())]
+            enl += [ENL(torch.squeeze(noisy_denoised).cpu().detach().numpy())]
+            epi += [EPI(torch.squeeze(clean).cpu().detach().numpy(), torch.squeeze(noisy_denoised).cpu().detach().numpy())]
 
-        # Create montage and save images
-        print('Saving images and montages to: {}'.format(save_path))
-        for i in range(noisy_denoised.shape[0]):
+            if batch_idx%10==0 or batch_idx==5 or batch_idx==82:
+              save_img_path = os.path.join(save_path, str(batch_idx))
+              if not os.path.isdir(save_img_path):
+                  os.mkdir(save_img_path)
+              save_image(clean.cpu(), os.path.join(save_img_path, f'clean.png'))
+              # save_image(source.cpu(), os.path.join(save_img_path, f'noisiest.png'))
+              # save_image(target.cpu(), os.path.join(save_img_path, f'noisier.png'))
+              save_image(noisy_original.cpu(), os.path.join(save_img_path, f'noisy_original.png'))
+              save_image(noisy_transformed.cpu(), os.path.join(save_img_path, f'noisy_transformed.png'))
+              save_image(noisy_transformed_denoised.cpu(), os.path.join(save_img_path, f'noisy_transformed_denoised.png'))  
+              save_image(noisy_denoised.cpu(), os.path.join(save_img_path, f'noisy_denoised.png'))
+        
+        print(psnr_)
+        print(ssim)
 
-            img_name = test_loader.dataset.imgs[i]
-            save_path_img = os.path.join(save_path, 'idx'+str(i))
-            if not os.path.isdir(save_path_img):
-                os.mkdir(save_path_img)
-            
-            print(f"Index: {i}")
+        divide = lambda x: sum(x)/len(x)
+        psnr_ = divide(psnr_)
+        ssim = divide(ssim)
+        enl = divide(enl)
+        epi = divide(epi)
 
-            psnr_ = psnr(noisy_denoised[i].cpu(), clean[i].cpu()).item()
-            print("PSNR(dB):", psnr_)
-
-            ssim_ = ssim(noisy_denoised[i].unsqueeze(0), clean[i].unsqueeze(0)).item()
-            print("SSIM:", ssim_)
-            print()
-
-            stats = {"PSNR": psnr_, "SSIM": ssim_}
-            fname_dict = '{}/stats.json'.format(save_path_img)
-            with open(fname_dict, 'w') as fp:
-                json.dump(stats, fp, indent=2)
-
-            save_image(clean[i], os.path.join(save_path_img, f'clean.png'))
-            save_image(noisy_denoised[i], os.path.join(save_path_img, f'noisy_denoised.png'))
-            save_image(noisy_original[i], os.path.join(save_path_img, f'noisy_original.png'))
-            #create_montage(img_name, self.p.noise_type, save_path_img, noisy_original[i], noisy_denoised[i], clean[i], show)
+        print(f'Avg. PSNR (N2N) = {psnr_:0.2f}')
+        print(f'Avg. SSIM (N2N) = {ssim:0.2f}')
+        print(f'Avg. ENL (N2N) = {enl:0.2f}')
+        print(f'Avg. EPI (N2N) = {epi:0.2f}')
+        
+        
 
     def inverse_anscombe(self, z):
         '''
@@ -268,7 +285,7 @@ class Noise2Noise(object):
 
     def eval(self, valid_loader, epoch):
         """Evaluates denoiser on validation set."""
-
+        torch.cuda.empty_cache()
         if self.p.clean_targets:
             self.save_dir = f'supervised-lr{self.p.learning_rate}-{self.p.noise_param}'
         else:
@@ -307,37 +324,36 @@ class Noise2Noise(object):
                 clean = clean.cuda()
                 noisy_original = noisy_original.cuda()
 
-            # Denoise
-            noisy_denoised = self.model(noisy_transformed)
+            with torch.no_grad():
+                # Denoise
+                noisy_denoised = self.model(noisy_transformed)
+                noisy_denoised = self.model(noisy_denoised)
 
-            # Inverse transformation
-            if self.p.transform=="anscombe":
-                noisy_denoised = self.normalize(self.inverse_anscombe(noisy_denoised*255))
-            elif self.p.transform=="log":
-                noisy_denoised = self.normalize(self.inverse_log(c, noisy_denoised*255))
-            
-            source_denoised = self.model(source)
-            noisy_original_denoised = self.model(noisy_original)
+                # Inverse transformation
+                if self.p.transform=="anscombe":
+                    noisy_denoised = self.normalize(self.inverse_anscombe(noisy_denoised*255))
+                elif self.p.transform=="log":
+                    noisy_denoised = self.normalize(self.inverse_log(c, noisy_denoised*255))
+                
+                source_denoised = self.model(source)
+                noisy_original_denoised = self.model(noisy_original)
+                #noisy_original_denoised = self.model(noisy_original_denoised)
 
-            # Update loss
-            loss = self.loss(noisy_denoised, clean)
-            loss_meter.update(loss.item())
+                # Update loss
+                loss = self.loss(noisy_denoised, clean)
+                if self.p.loss == 'l2_ssim':
+                  loss = self.w1*loss + (1-self.w1)*(1-ssim1(noisy_denoised, clean))
 
-            # print(clean.dtype)
-            # print(noisy_denoised.dtype)
-            # print(noisy_transformed.dtype)
+                loss_meter.update(loss.item())
 
-            # Compute PSNR
-            # if self.is_mc:
-            #     source_denoised = reinhard_tonemap(source_denoised)
-            # TODO: Find a way to offload to GPU, and deal with uneven batch sizes
-            for i in range(self.p.batch_size):
-                noisy_denoised = noisy_denoised.cpu()
-                noisy_original_denoised = noisy_original_denoised.cpu()
-                clean = clean.cpu()
-                psnr_meter.update(psnr(noisy_denoised[i], clean[i]).item())
-                ssim_meter.update(ssim(noisy_denoised[i].unsqueeze(0), clean[i].unsqueeze(0)).item())
-                ssim_meter2.update(ssim_scratch(noisy_denoised[i].unsqueeze(0), clean[i].unsqueeze(0)).item())
+
+                for i in range(noisy_denoised.shape[0]):
+                    noisy_denoised = noisy_denoised.cpu()
+                    noisy_original_denoised = noisy_original_denoised.cpu()
+                    clean = clean.cpu()
+                    psnr_meter.update(peak_signal_noise_ratio(noisy_denoised[i].squeeze(0).cpu().detach().numpy(), clean[i].squeeze(0).cpu().detach().numpy()))
+                    ssim_meter.update(ssim(noisy_denoised[i].unsqueeze(0), clean[i].unsqueeze(0)).item())
+                    ssim_meter2.update(ssim_scratch(noisy_denoised[i].squeeze(0).cpu().detach().numpy(), clean[i].squeeze(0).cpu().detach().numpy()))
 
             if (batch_idx + 1) % self.p.report_interval//5 == 0 and batch_idx and epoch%10==0:
                 epoch_results_path = os.path.join(results_path, f'epoch_{epoch}')
@@ -348,14 +364,14 @@ class Noise2Noise(object):
                 if not os.path.exists(epoch_results_path):
                   os.makedirs(epoch_results_path)
 
-                save_image(source, os.path.join(epoch_results_path, f'it{batch_idx}_source.png'))
-                save_image(source_denoised, os.path.join(epoch_results_path, f'it{batch_idx}_source_denoised.png'))
-                save_image(target, os.path.join(epoch_results_path, f'it{batch_idx}_target.png'))
-                save_image(clean, os.path.join(epoch_results_path, f'it{batch_idx}_clean.png'))
-                save_image(noisy_transformed, os.path.join(epoch_results_path, f'it{batch_idx}_noisy_transformed.png'))
-                save_image(noisy_denoised, os.path.join(epoch_results_path, f'it{batch_idx}_noisy_denoised.png'))
+                save_image(source, os.path.join(epoch_results_path,             f'it{batch_idx}_source.png'))
+                save_image(source_denoised, os.path.join(epoch_results_path,    f'it{batch_idx}_source_denoised.png'))
+                save_image(target, os.path.join(epoch_results_path,             f'it{batch_idx}_target.png'))
+                save_image(clean, os.path.join(epoch_results_path,              f'it{batch_idx}_clean.png'))
+                save_image(noisy_transformed, os.path.join(epoch_results_path,  f'it{batch_idx}_noisy_transformed.png'))
+                save_image(noisy_denoised, os.path.join(epoch_results_path,     f'it{batch_idx}_noisy_denoised.png'))
 
-                save_image(noisy_original, os.path.join(epoch_results_path, f'it{batch_idx}_noisy_original.png'))
+                save_image(noisy_original, os.path.join(epoch_results_path,          f'it{batch_idx}_noisy_original.png'))
                 save_image(noisy_original_denoised, os.path.join(epoch_results_path, f'it{batch_idx}_noisy_original_denoised.png'))
 
 
@@ -372,7 +388,7 @@ class Noise2Noise(object):
         """Trains denoiser on training set."""
 
         self.model.train(True)
-
+        torch.cuda.empty_cache()
         self._print_params()
         num_batches = len(train_loader)
         print(num_batches, self.p.report_interval )
@@ -419,9 +435,18 @@ class Noise2Noise(object):
                 if self.p.clean_targets:   # for supervised training
                     source_denoised = self.model(noisy_transformed)
                     loss = self.loss(source_denoised, clean)
+                    print(clean)
+                    print(source_denoised)
+                    if self.p.loss == 'l2_ssim':
+                      loss = self.w1*loss + (1-self.w1)*(1-ssim(source_denoised, clean))
                 else:
                     source_denoised = self.model(source)
+                    # source_denoised = self.normalize(self.inverse_anscombe(source_denoised*255))
+                    # target          = self.normalize(self.inverse_anscombe(target*255))
+                    source_denoised = self.model(source_denoised)
                     loss = self.loss(source_denoised, target)
+                    if self.p.loss == 'l2_ssim':
+                      loss = self.w1*loss + (1-self.w1)*(1-ssim1(source_denoised, target))
 
                 loss_meter.update(loss.item())
 
